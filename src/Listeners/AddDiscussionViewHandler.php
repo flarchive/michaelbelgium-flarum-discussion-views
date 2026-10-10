@@ -1,0 +1,88 @@
+<?php
+
+namespace Michaelbelgium\Discussionviews\Listeners;
+
+use Carbon\Carbon;
+use Flarum\Api\Context;
+use Flarum\Discussion\Discussion;
+use Flarum\Extension\ExtensionManager;
+use Flarum\Settings\SettingsRepositoryInterface;
+use Illuminate\Contracts\Events\Dispatcher;
+use Illuminate\Support\Arr;
+use Jaybizzle\CrawlerDetect\CrawlerDetect;
+use Michaelbelgium\Discussionviews\Events\DiscussionWasViewed;
+use Michaelbelgium\Discussionviews\Models\DiscussionView;
+use Psr\Log\LoggerInterface;
+
+class AddDiscussionViewHandler
+{
+    public function __construct(
+        private readonly SettingsRepositoryInterface $settings,
+        private readonly Dispatcher $events,
+        private readonly ExtensionManager $extensionManager,
+        private readonly LoggerInterface $logger
+    ) {}
+
+    public function __invoke(Context $context, Discussion $discussion): void
+    {
+        $request = $context->request;
+        $actor = $context->getActor();
+
+        if ($actor->isGuest() && !$this->settings->get('michaelbelgium-discussionviews.track_guests', true)) {
+            return;
+        }
+
+        if($this->settings->get('michaelbelgium-discussionviews.ignore_crawlers', false))
+        {
+            $crDetect = new CrawlerDetect(userAgent: $request->getHeaderLine('User-Agent'));
+
+            if ($crDetect->isCrawler()) {
+                return;
+            }
+        }
+
+        //The extension fof/merge-discussions does an api call to get info of a discussion when merging discussions, but it shouldn't count as a view
+        //So if the extension is enabled and if the query parameter bySlug is set - which only is set when going to a discussion page manually and not through the api
+        if ($this->extensionManager->isEnabled('fof-merge-discussions'))
+        {
+            $bySlug = Arr::get($request->getQueryParams(), 'bySlug', false);
+
+            if (!$bySlug) {
+                $this->logger->info(__CLASS__ . ': Not counting view to discussion '. $discussion->id .' because it wasn\'t a manual visit to the discussion page');
+                return;
+            }
+        }
+
+        $clientIp = Arr::get($request->getServerParams(), 'HTTP_CLIENT_IP') ??
+            Arr::get($request->getServerParams(), 'HTTP_X_FORWARDED_FOR') ??
+            Arr::get($request->getServerParams(), 'REMOTE_ADDR');
+
+        if($this->settings->get('michaelbelgium-discussionviews.track_unique', false))
+        {
+            if($clientIp === null)
+            {
+                $this->logger->warning(__CLASS__ . ': Unable to get client IP => not counting this view for discussion '. $discussion->id .'.');
+                return;
+            }
+
+            if($discussion->views()->where('ip', $clientIp)->exists())
+                return;
+        }
+
+        $view = new DiscussionView();
+
+        if(!$actor->isGuest()) {
+            $view->user()->associate($actor);
+        }
+
+        $view->ip = $clientIp;
+        $view->visited_at = Carbon::now();
+
+        $discussion->views()->save($view);
+
+        //for the (un)popular filter
+        $discussion->increment('view_count');
+
+        $this->events->dispatch(new DiscussionWasViewed($actor, $discussion));
+    }
+}
