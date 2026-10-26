@@ -1,0 +1,15 @@
+import Extend from "flarum/common/extenders";
+import Discussion from "flarum/common/models/Discussion";
+import DiscussionView from "./models/DiscussionView";
+
+export default [
+  new Extend.Store().add("discussionview", DiscussionView),
+
+  new Extend.Model(Discussion)
+    .attribute<boolean>("canReset")
+    .attribute<number>("viewCount")
+    .attribute<boolean>("canViewNumber")
+    .attribute<boolean>("canViewList")
+    .hasMany<DiscussionView>("latestViews")
+    .hasMany<DiscussionView>("uniqueViews"),
+];
